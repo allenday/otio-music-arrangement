@@ -60,8 +60,7 @@ minversion = "6.0"
 addopts = "-ra -q"
 testpaths = [
     "tests",
-]
-pythonpath = "src"
+] 
 
 [tool.coverage.run]
 source = ["src/otio_music_arrangement"]

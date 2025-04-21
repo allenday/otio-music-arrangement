@@ -98,9 +98,10 @@ def create_music_video_timeline(music_data):
                 marker_based_duration_rt, marker_based_duration_rt.to_seconds(), rate)
 
     # --- Enforce Minimum Video Frame Duration for Timeline Items ---
-    # Calculate one frame duration at the standard video rate
+    # Calculate one frame duration based on the sequence rate we expect (30fps)
     # Use precise fraction 1001/30000 for 29.97
-    one_frame_video_rt = otio.opentime.RationalTime(1001, 30000) 
+    # one_frame_video_rt = otio.opentime.RationalTime(1001, 30000) 
+    one_frame_video_rt = otio.opentime.RationalTime(1, 30) # Use 1 frame at 30fps
     timeline_marker_duration_rt = marker_based_duration_rt # Start with calculated duration
     
     # If the marker duration is very short (less than one video frame), 

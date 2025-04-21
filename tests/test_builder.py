@@ -8,38 +8,6 @@ import opentimelineio as otio
 from otio_music_arrangement import builder
 from otio_music_arrangement import timing_utils # Needed? Maybe not directly
 
-# --- Direct Adapter Import --- 
-import sys
-# Add the adapter's src directory to sys.path to allow direct import
-adapter_src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'otio-fcpx-xml-adapter', 'src'))
-if adapter_src_path not in sys.path:
-    sys.path.insert(0, adapter_src_path)
-
-try:
-    # Attempt to import the specific function from the local adapter code
-    from otio_fcpx_xml_adapter import fcpx_xml
-    local_fcpx_write_to_string = fcpx_xml.write_to_string
-    print(f"Successfully imported local adapter function from: {adapter_src_path}")
-except ImportError as e:
-    print(f"ERROR: Could not import local adapter from {adapter_src_path}. Error: {e}")
-    local_fcpx_write_to_string = None
-# --- End Direct Adapter Import ---
-
-# # Explicitly try to register standard adapters in case discovery fails - REMOVED
-# import opentimelineio.adapters
-# # opentimelineio.adapters.manifest_from_file("path/to/manifest.plugin_manifest") # If needed
-# # For testing, let's ensure the built-in ones are considered:
-# try:
-#     # Attempt to load standard manifest (might not be needed, but for safety)
-#     manifest = otio.adapters.manifest.manifest_from_string(
-#         otio.adapters.manifest._MANIFEST_TEXT
-#     )
-#     otio.plugins.manifest.ActiveManifest(manifests=[manifest])
-# except AttributeError: 
-#     # _MANIFEST_TEXT might be internal/changed, ignore if not found
-#     print("Could not explicitly load internal manifest text, relying on standard discovery.")
-#     pass 
-
 # Define the path to the test data relative to this test file
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 RICKROLL_JSON_PATH = os.path.join(TEST_DATA_DIR, 'rickroll.json')
@@ -93,7 +61,7 @@ def test_create_timeline_from_rickroll():
     calculated_duration_rt = max(last_beat_rt, last_adjusted_segment_end_rt) # Original marker-based duration
 
     # Calculate the expected duration for timeline items (enforcing min 1 video frame)
-    one_frame_video_rt = otio.opentime.RationalTime(1001, 30000) # 1 frame at 29.97
+    one_frame_video_rt = otio.opentime.RationalTime(1, 30) # Use 1 frame at 30fps (matching builder logic)
     expected_timeline_item_duration_rt = calculated_duration_rt
     if calculated_duration_rt.value > 0 and calculated_duration_rt < one_frame_video_rt:
         expected_timeline_item_duration_rt = one_frame_video_rt
@@ -209,7 +177,7 @@ def test_create_timeline_from_rickroll():
 
 # @pytest.mark.skip(reason="Test hangs during execution, needs investigation")
 def test_export_timeline_to_otio(tmp_path):
-    """Tests creating and exporting a timeline using the *local* FCPXML adapter code."""
+    """Tests creating and exporting a timeline using the *installed* FCPXML adapter."""
     music_data = load_test_data(RICKROLL_JSON_PATH)
     timeline = builder.create_music_video_timeline(music_data)
     assert timeline is not None
@@ -239,26 +207,28 @@ def test_export_timeline_to_otio(tmp_path):
     print("--------------------------------------------\n")
     # --- END DEBUG ---
 
-    # Check if the local adapter function was imported successfully
-    assert local_fcpx_write_to_string is not None, "Local FCPXML adapter function failed to import."
+    # # Check if the local adapter function was imported successfully -- REMOVED
+    # assert local_fcpx_write_to_string is not None, "Local FCPXML adapter function failed to import."
 
-    # Write to a stable location: Downloads directory
-    output_dir = os.path.expanduser("~/Downloads")
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "rickroll_output_direct.fcpxml") # New name
-    print(f"Writing FCPXML directly to: {output_path}")
+    # Write to a temporary directory provided by pytest
+    output_path = os.path.join(str(tmp_path), "rickroll_output.fcpxml") 
+    print(f"Writing FCPXML via OTIO adapter to: {output_path}")
 
-    # Print available adapters for debugging (still useful context)
+    # Print available adapters for debugging
     available_adapters = otio.adapters.available_adapter_names()
-    print("Available OTIO adapters (for context):", available_adapters)
+    print("Available OTIO adapters:", available_adapters)
+    assert 'fcpx_xml' in available_adapters # Check if our target adapter is listed
 
-    # Use the *directly imported* function instead of otio.adapters.write_to_file
+    # Use the standard OTIO adapter writing mechanism
     try:
-        xml_string = local_fcpx_write_to_string(timeline)
-        with open(output_path, 'w') as f:
-            f.write(xml_string)
+        otio.adapters.write_to_file(
+            timeline,
+            output_path,
+            adapter_name='fcpx_xml',
+            sequence_rate=120.0 # Pass the desired sequence rate
+        )
     except Exception as e:
-        pytest.fail(f"Direct call to local_fcpx_write_to_string failed: {e}")
+        pytest.fail(f"otio.adapters.write_to_file failed for fcpx_xml: {e}")
 
     assert os.path.exists(output_path)
     assert os.path.getsize(output_path) > 0
