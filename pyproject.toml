@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "otio-music-arrangement"
+version = "0.1.0"
+authors = [
+  # Add your name and email here if you like
+  # { name="Allen Day", email="allenday@allenday.com" },
+]
+description = "Builds OpenTimelineIO timelines for music video editing workflows."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # Or choose another license
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "opentimelineio >= 0.15", # Specify a version or range appropriate for your needs
+    'otio-fcpx-xml-adapter @ git+https://github.com/allenday/otio-fcpx-xml-adapter.git@dev-refactor', # Use custom version via PEP 508
+    "ffmpeg-python >= 0.2.0" # Add ffmpeg-python
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/allenday/otio-music-arrangement" # Replace with your repo URL later
+"Bug Tracker" = "https://github.com/allenday/otio-music-arrangement/issues" # Replace with your repo URL later
+
+# Optional: If you plan to make this a command-line tool
+# [project.scripts]
+# otio-music-build = "otio_music_arrangement.cli:main"
+
+[tool.hatch.version]
+path = "src/otio_music_arrangement/__init__.py" # Assuming source layout
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/otio_music_arrangement"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
+pythonpath = "src"
+
+[tool.coverage.run]
+source = ["src/otio_music_arrangement"]
+
+[tool.coverage.report]
+fail_under = 50
+show_missing = true 
