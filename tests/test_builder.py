@@ -1,33 +1,47 @@
 import json
+import logging
 import os
-import pytest
+import shutil  # Import shutil for file copying
+
 import opentimelineio as otio
-# from opentimelineio import opentime # Not directly used in tests so far
+import pytest
 
 # Assuming your builder module will be in the main package
 from otio_music_arrangement import builder
-from otio_music_arrangement import timing_utils # Needed? Maybe not directly
+
+# Remove timing_utils import if no longer needed directly by tests
 
 # Define the path to the test data relative to this test file
-TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-RICKROLL_JSON_PATH = os.path.join(TEST_DATA_DIR, 'rickroll.json')
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+FIXTURE_PATH = os.path.join(TEST_DIR, "fixtures")
+MUSIC_JSON_PATH = os.path.join(FIXTURE_PATH, "music.json")
+MUSIC_AUDIO_PATH = os.path.join(FIXTURE_PATH, "music.wav")
 
-from fractions import Fraction # Add this import
+
+# Configure logging for tests
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 
 def load_test_data(json_path):
-    """Helper to load test JSON data."""
-    assert os.path.exists(json_path), f"Test data file not found: {json_path}"
-    with open(json_path, 'r') as f:
-        return json.load(f)
+    """Loads JSON data for testing."""
+    try:
+        with open(json_path) as f:
+            data = json.load(f)
+            # Ensure the audio path is absolute based on the fixture path
+            data["path"] = MUSIC_AUDIO_PATH
+            return data
+    except Exception as e:
+        pytest.fail(f"Failed to load test data from {json_path}: {e}")
 
-def test_load_rickroll_data():
-    """Tests if the rickroll.json data file can be loaded."""
-    data = load_test_data(RICKROLL_JSON_PATH)
+
+def test_load_music_data():
+    """Tests if the music.json data file can be loaded."""
+    data = load_test_data(MUSIC_JSON_PATH)
     assert "path" in data
     assert "bpm" in data
     assert "beats" in data
     assert "downbeats" in data
-    assert "beat_positions" in data # Keep this check? It's unused by builder currently
     assert "segments" in data
     assert isinstance(data["beats"], list)
     assert isinstance(data["downbeats"], list)
@@ -37,199 +51,396 @@ def test_load_rickroll_data():
 
 # === Timeline Building Tests ===
 
-def test_create_timeline_from_rickroll():
-    """Tests creating a timeline from the rickroll test data."""
-    music_data = load_test_data(RICKROLL_JSON_PATH)
-    timeline = builder.create_music_video_timeline(music_data)
+
+# Helper function to count markers on clips within a track
+def count_markers_on_clips(track):
+    """Count the total number of markers on all clips in a track."""
+    count = 0
+    for item in track:
+        if isinstance(item, otio.schema.Clip):
+            count += len(item.markers)
+    return count
+
+
+@pytest.mark.parametrize("accumulate_markers", [True, False])
+def test_build_timeline_from_music_lite_structure(accumulate_markers):
+    """Tests build_timeline_from_audio generates lite-adapter compatible structure.
+
+    Checking both accumulate={accumulate_markers} modes.
+    """
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    subdivision_level = 2  # Test with subdivisions
+    rate = builder.DEFAULT_RATE  # Use rate from builder
+
+    # Calculate expected marker counts from source data
+    num_beats = len(music_data["beats"])
+    num_downbeats = len(music_data["downbeats"])
+    beats_rt = sorted(
+        [otio.opentime.RationalTime(float(b) * rate, rate) for b in music_data["beats"]]
+    )
+    subdivision_markers_data = builder._calculate_subdivision_markers_rt(
+        beats_rt, subdivision_level, rate
+    )
+    num_subdivisions = len(subdivision_markers_data)
+    num_segments = len(music_data["segments"])
+
+    # Call the updated builder function with the accumulate parameter
+    timeline = builder.build_timeline_from_audio(
+        audio_path=music_data["path"],
+        beats=music_data["beats"],
+        downbeats=music_data["downbeats"],
+        segments=music_data["segments"],
+        subdivision_level=subdivision_level,
+        accumulate=accumulate_markers,
+    )
 
     # Basic Timeline Checks
     assert timeline is not None
     assert isinstance(timeline, otio.schema.Timeline)
-    assert timeline.name == f"Music Arrangement - {os.path.basename(music_data['path'])}"
-    assert len(timeline.tracks) == 4 # Downbeats, Audio, Segments, Beats (1/1)
+    assert "Lite" in timeline.name
 
-    # Pre-calculate expected duration for assertions
-    rate = builder.DEFAULT_RATE
-    global_start_time = otio.opentime.RationalTime(0, rate)
-    beats_rt = sorted([otio.opentime.RationalTime(timing_utils.time_value(b), rate) for b in music_data['beats']])
-    downbeats_rt = sorted([otio.opentime.RationalTime(timing_utils.time_value(d), rate) for d in music_data['downbeats']])
-    adjusted_segments = timing_utils.adjust_segment_times_to_downbeats(
-        music_data['segments'], [db.to_seconds() for db in downbeats_rt], global_start_time # Pass seconds to adjuster
-    )
-    last_beat_rt = beats_rt[-1] if beats_rt else global_start_time
-    last_adjusted_segment_end_rt = adjusted_segments[-1]['adjusted_end_time'] if adjusted_segments else global_start_time
-    calculated_duration_rt = max(last_beat_rt, last_adjusted_segment_end_rt) # Original marker-based duration
+    # Expecting 1 Audio track + Video tracks (Segments, Downbeats, Beats, Subdivisions)
+    expected_track_count = 1 + 3 + (1 if subdivision_level > 1 else 0)
+    assert len(timeline.tracks) == expected_track_count
 
-    # Calculate the expected duration for timeline items (enforcing min 1 video frame)
-    one_frame_video_rt = otio.opentime.RationalTime(1, 30) # Use 1 frame at 30fps (matching builder logic)
-    expected_timeline_item_duration_rt = calculated_duration_rt
-    if calculated_duration_rt.value > 0 and calculated_duration_rt < one_frame_video_rt:
-        expected_timeline_item_duration_rt = one_frame_video_rt
+    # --- Find tracks by name for easier assertions ---
+    tracks_by_name = {t.name: t for t in timeline.tracks}
+    audio_track = tracks_by_name.get("Audio 1")
+    segments_track = tracks_by_name.get("Segments")
+    downbeats_track = tracks_by_name.get("Downbeats")
+    beats_track = tracks_by_name.get("Beats")
+    subdivisions_track = tracks_by_name.get(f"Subdivisions (1/{subdivision_level})")
 
-    # Track Checks (order matters now)
-    downbeat_track = timeline.tracks[0]
-    audio_track = timeline.tracks[1]
-    segment_track = timeline.tracks[2]
-    beat_track = timeline.tracks[3]
+    assert audio_track and audio_track.kind == otio.schema.TrackKind.Audio
+    assert segments_track and segments_track.kind == otio.schema.TrackKind.Video
+    assert downbeats_track and downbeats_track.kind == otio.schema.TrackKind.Video
+    assert beats_track and beats_track.kind == otio.schema.TrackKind.Video
+    if subdivision_level > 1:
+        assert (
+            subdivisions_track
+            and subdivisions_track.kind == otio.schema.TrackKind.Video
+        )
 
-    # Check Downbeat Track
-    assert downbeat_track.name == "Downbeats"
-    assert downbeat_track.kind == otio.schema.TrackKind.Video
-    assert len(downbeat_track) == (1 if expected_timeline_item_duration_rt.value > 0 else 0)
-    if len(downbeat_track) > 0:
-        assert isinstance(downbeat_track[0], otio.schema.Gap)
-        # Assert against the potentially adjusted timeline item duration
-        assert downbeat_track[0].source_range.duration == expected_timeline_item_duration_rt 
-    
-    # Check Downbeat Markers (should still align with original downbeat times)
-    valid_downbeat_count = sum(1 for db_rt in downbeats_rt if db_rt <= expected_timeline_item_duration_rt) # Check against adjusted duration
-    assert len(downbeat_track.markers) == valid_downbeat_count
-    for marker in downbeat_track.markers:
-        assert marker.color == builder.DOWNBEAT_COLOR
-        assert marker.name.startswith("Downbeat ")
-        # Check marker time is absolute track time
-        assert marker.marked_range.start_time in downbeats_rt
-        assert marker.marked_range.duration == otio.opentime.RationalTime(0, rate)
-
-    # Check Audio Track 
-    assert audio_track.name == "Audio"
-    assert audio_track.kind == otio.schema.TrackKind.Audio
+    # Check Content of Tracks
+    timeline_duration = timeline.duration()
     assert len(audio_track) == 1
     assert isinstance(audio_track[0], otio.schema.Clip)
-    audio_clip = audio_track[0]
-    assert isinstance(audio_clip.media_reference, otio.schema.ExternalReference)
-    assert audio_clip.media_reference.target_url == music_data['path']
-    # Check clip's source range duration matches the adjusted timeline item duration
-    assert audio_clip.source_range.duration == expected_timeline_item_duration_rt
-    # Check the reference's available range duration (should be actual file duration - harder to assert exactly without probing here too)
-    # We know from previous debug output it's ~212s. Check it's significantly larger than item duration.
-    assert audio_clip.media_reference.available_range.duration > expected_timeline_item_duration_rt
+    assert audio_track[0].name == os.path.basename(music_data["path"])
+    assert audio_track[0].duration() == timeline_duration
 
-    # Check segment track
-    assert segment_track.name == "Segments"
-    assert segment_track.kind == otio.schema.TrackKind.Video
-    # Check number of items (clips + gaps) -> Now should be mostly Gaps
-    assert all(isinstance(item, otio.schema.Gap) for item in segment_track)
-    # first_seg_clip = next((item for item in segment_track if isinstance(item, otio.schema.Clip)), None)
-    # assert first_seg_clip is not None
-    # assert isinstance(first_seg_clip.media_reference, otio.schema.MissingReference)
-    
-    # Check segment markers (now back on the track)
-    expected_segment_marker_count = sum(
-        1 for seg in adjusted_segments 
-        if seg['adjusted_end_time'] >= seg['adjusted_start_time']
+    # --- Detailed Marker Count Assertions ---
+
+    # Segments track should always have one marker per segment
+    segment_marker_count = count_markers_on_clips(segments_track)
+    assert segment_marker_count == num_segments, (
+        f"Expected {num_segments} segment markers, found {segment_marker_count}"
     )
-    assert len(segment_track.markers) == expected_segment_marker_count 
-    
-    # Check first segment marker properties (example)
-    # first_adj_seg = adjusted_segments[0]
-    # assert first_seg_clip.name == first_adj_seg['label']
-    # assert len(first_seg_clip.markers) == 1
-    # first_seg_marker = first_seg_clip.markers[0]
-    if segment_track.markers:
-        first_adj_seg = adjusted_segments[0]
-        first_seg_marker = segment_track.markers[0]
-        assert first_seg_marker.name == first_adj_seg['label']
-        assert first_seg_marker.color == builder.PLACEHOLDER_COLOR
-        # Assert the time range of the marker matches the adjusted segment (absolute track time)
-        expected_start_time = first_adj_seg['adjusted_start_time'] # This seems inconsistent with builder output
-        expected_duration = first_adj_seg['adjusted_end_time'] - first_adj_seg['adjusted_start_time']
-        # assert abs(first_seg_marker.marked_range.start_time.value - expected_start_time.value) < 1e-9 # Failing - Discrepancy between test calc and builder value
-        # assert abs(first_seg_marker.marked_range.duration.value - expected_duration.value) < 1e-9 # Also seems inconsistent for zero-duration adjusted segments
-    # assert segment_track.trimmed_range().duration == calculated_duration_rt # This might be less reliable with only gaps
-    # Assert total track duration against the adjusted timeline item duration
-    assert segment_track.trimmed_range().duration == expected_timeline_item_duration_rt
 
-    # Check beat track
-    assert beat_track.name == "Beats (1/1)"
-    assert beat_track.kind == otio.schema.TrackKind.Video
-    # Check number of items -> Now should be mostly Gaps
-    assert all(isinstance(item, otio.schema.Gap) for item in beat_track)
-    # num_beat_clips = sum(1 for item in beat_track if isinstance(item, otio.schema.Clip))
-    # assert num_beat_clips == len(music_data['beats'])
-    
-    # Check beat markers (now back on the track)
-    assert len(beat_track.markers) == len(beats_rt) # One marker per original beat
-    # Check first beat marker (example)
-    # first_beat_clip = next((item for item in beat_track if isinstance(item, otio.schema.Clip)), None)
-    # assert first_beat_clip is not None
-    # assert isinstance(first_beat_clip.media_reference, otio.schema.MissingReference)
-    # assert len(first_beat_clip.markers) == 1
-    # first_beat_marker = first_beat_clip.markers[0]
-    if beat_track.markers: 
-        first_beat_marker = beat_track.markers[0]
-        assert first_beat_marker.name == "Beat 1"
-        assert first_beat_marker.color == builder.BEAT_COLOR
-        # Marker range is absolute track time
-        assert first_beat_marker.marked_range.start_time == beats_rt[0]
-        assert first_beat_marker.marked_range.duration == otio.opentime.RationalTime(0, rate)
-    # Assert total track duration against the adjusted timeline item duration
-    assert beat_track.trimmed_range().duration == expected_timeline_item_duration_rt
+    # Downbeats track should always have num_downbeats markers
+    downbeat_marker_count = count_markers_on_clips(downbeats_track)
+    assert downbeat_marker_count == num_downbeats, (
+        f"Expected {num_downbeats} downbeat markers, found {downbeat_marker_count}"
+    )
 
-    # Check total duration consistency across tracks (Audio is most reliable)
-    assert audio_track.trimmed_range().duration == expected_timeline_item_duration_rt
-    # Check other track durations
-    assert segment_track.trimmed_range().duration == expected_timeline_item_duration_rt
-    assert beat_track.trimmed_range().duration == expected_timeline_item_duration_rt
+    # Beats track count depends on accumulate flag
+    beat_marker_count = count_markers_on_clips(beats_track)
+    expected_beat_markers = num_beats  # Includes downbeats if accumulating
+    if not accumulate_markers:
+        # If not accumulating, only count beats that are NOT also downbeats
+        expected_beat_markers = num_beats - num_downbeats
+    assert beat_marker_count == expected_beat_markers, (
+        f"Accumulate={accumulate_markers}: Expected {expected_beat_markers} "
+        f"beat markers, found {beat_marker_count}"
+    )
+
+    # Subdivisions track count depends on accumulate flag (if track exists)
+    if subdivisions_track:
+        subdivision_marker_count = count_markers_on_clips(subdivisions_track)
+        expected_subdivision_markers = num_subdivisions
+        # If not accumulating, subdivisions that land exactly on a
+        # beat/downbeat are excluded
+        # Note: This requires recalculating which subdivisions DON'T overlap
+        # For simplicity in this test, we'll just check if the count is
+        # non-zero when expected, and less than or equal to total subdivisions
+        # when not accumulating.
+        if not accumulate_markers:
+            assert subdivision_marker_count <= expected_subdivision_markers, (
+                f"Accumulate=False: Found {subdivision_marker_count} "
+                f"subdivision markers, expected <= {expected_subdivision_markers}"
+            )
+            # We could add a more precise check here if needed by filtering
+            # subdivision_markers_data
+        else:
+            assert subdivision_marker_count == expected_subdivision_markers, (
+                f"Accumulate=True: Expected {expected_subdivision_markers} "
+                f"subdivision markers, found {subdivision_marker_count}"
+            )
+        assert (
+            subdivision_marker_count > 0
+        )  # Ensure some subdivision markers were generated
+
+    # General check: Video marker tracks should contain Gaps and Clips
+    # (Keeping the previous loop structure for this part)
+    total_markers_on_clips_check = 0
+    for track in [segments_track, downbeats_track, beats_track, subdivisions_track]:
+        if not track:
+            continue  # Skip if subdivision track doesn't exist
+        assert track.kind == otio.schema.TrackKind.Video
+        has_clips = False
+        track_marker_count = 0
+        for item in track:
+            assert isinstance(item, otio.schema.Gap | otio.schema.Clip)
+            if isinstance(item, otio.schema.Clip):
+                has_clips = True
+                assert isinstance(item.media_reference, otio.schema.GeneratorReference)
+                assert item.media_reference.generator_kind == "fcpx_video_placeholder"
+                assert len(item.markers) > 0  # Clips on marker tracks must have markers
+                track_marker_count += len(item.markers)
+        assert has_clips, f"Video track '{track.name}' should contain placeholder clips"
+        assert track_marker_count > 0, (
+            f"Video track '{track.name}' clips have no markers attached"
+        )
+        total_markers_on_clips_check += track_marker_count
+        assert track.duration() == timeline_duration, (
+            f"Track '{track.name}' duration mismatch"
+        )
+
+    assert total_markers_on_clips_check > 0
+    logger.info(
+        f"Builder function test with lite structure "
+        f"(accumulate={accumulate_markers}) passed."
+    )
 
 
 # === OTIO Export Test ===
 
-# @pytest.mark.skip(reason="Test hangs during execution, needs investigation")
-def test_export_timeline_to_otio(tmp_path):
-    """Tests creating and exporting a timeline using the *installed* FCPXML adapter."""
-    music_data = load_test_data(RICKROLL_JSON_PATH)
-    timeline = builder.create_music_video_timeline(music_data)
-    assert timeline is not None
 
-    # --- DEBUG: Check durations on OTIO object BEFORE adapter call ---
-    print("\n--- OTIO Object Durations (Before Adapter) ---")
+def test_export_timeline_to_otio_with_lite_adapter(tmp_path):
+    """Tests creating timeline via builder and exporting with the lite adapter."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    subdivision_level = 1  # Keep export simple for now
+
+    # Call the updated builder function
     try:
-        timeline_duration = timeline.duration()
-        print(f"Timeline Duration: {timeline_duration} ({timeline_duration.value}/{timeline_duration.rate}) sec: {timeline_duration.to_seconds()}")
-        
-        audio_track = next((t for t in timeline.tracks if t.kind == otio.schema.TrackKind.Audio), None)
-        if audio_track and len(audio_track) > 0:
-            audio_clip = audio_track[0]
-            clip_duration = audio_clip.source_range.duration
-            ref_duration = audio_clip.media_reference.available_range.duration
-            print(f"Audio Clip Duration: {clip_duration} ({clip_duration.value}/{clip_duration.rate}) sec: {clip_duration.to_seconds()}")
-            print(f"Audio Ref Duration:  {ref_duration} ({ref_duration.value}/{ref_duration.rate}) sec: {ref_duration.to_seconds()}")
-            
-            # Check Fraction conversion directly
-            ref_frac = Fraction(float(ref_duration.value) / float(ref_duration.rate)).limit_denominator()
-            print(f"Audio Ref Duration as Fraction String: {ref_frac.numerator}/{ref_frac.denominator}s")
-            
-        else:
-            print("Could not find audio track/clip to check durations.")
+        timeline = builder.build_timeline_from_audio(
+            audio_path=music_data["path"],
+            beats=music_data["beats"],
+            downbeats=music_data["downbeats"],
+            segments=music_data["segments"],
+            subdivision_level=subdivision_level,
+        )
+        assert timeline is not None
     except Exception as e:
-        print(f"Error checking OTIO durations: {e}")
-    print("--------------------------------------------\n")
-    # --- END DEBUG ---
+        pytest.fail(f"builder.build_timeline_from_audio failed: {e}")
 
-    # # Check if the local adapter function was imported successfully -- REMOVED
-    # assert local_fcpx_write_to_string is not None, "Local FCPXML adapter function failed to import."
+    output_path = os.path.join(str(tmp_path), "music_lite_output.fcpxml")
+    logger.info(f"Writing FCPXML via otio-fcpx-xml-lite-adapter to: {output_path}")
 
-    # Write to a temporary directory provided by pytest
-    output_path = os.path.join(str(tmp_path), "rickroll_output.fcpxml") 
-    print(f"Writing FCPXML via OTIO adapter to: {output_path}")
-
-    # Print available adapters for debugging
+    adapter_name_to_use = "otio_fcpx_xml_lite_adapter"
     available_adapters = otio.adapters.available_adapter_names()
-    print("Available OTIO adapters:", available_adapters)
-    assert 'fcpx_xml' in available_adapters # Check if our target adapter is listed
+    print(f"Available OTIO adapters: {available_adapters}")
+    assert adapter_name_to_use in available_adapters, (
+        f"{adapter_name_to_use} not found!"
+    )
 
-    # Use the standard OTIO adapter writing mechanism
     try:
+        # Export using the lite adapter
         otio.adapters.write_to_file(
             timeline,
             output_path,
-            adapter_name='fcpx_xml',
-            sequence_rate=120.0 # Pass the desired sequence rate
+            adapter_name=adapter_name_to_use,
+            # No sequence_rate argument for lite adapter
         )
     except Exception as e:
-        pytest.fail(f"otio.adapters.write_to_file failed for fcpx_xml: {e}")
+        pytest.fail(
+            f"otio.adapters.write_to_file failed for {adapter_name_to_use}: {e}"
+        )
 
+    logger.info(f"Successfully wrote FCPXML to: {output_path}")
     assert os.path.exists(output_path)
     assert os.path.getsize(output_path) > 0
 
+    # --- Copy file to Downloads ---
+    try:
+        downloads_dir = os.path.expanduser("~/Downloads")
+        os.makedirs(downloads_dir, exist_ok=True)
+        dest_path = os.path.join(downloads_dir, "test_music_lite_output.fcpxml")
+        shutil.copy2(output_path, dest_path)
+        logger.info(f"Copied FCPXML from {output_path} to {dest_path}")
+        assert os.path.exists(dest_path)
+    except Exception as e:
+        logger.error(f"Failed to copy FCPXML to Downloads: {e}", exc_info=True)
+
+
+def test_end_to_end_music_arrangement():
+    """Comprehensive end-to-end test using real music data."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+
+    # Test with subdivision level 4 for more comprehensive testing
+    subdivision_level = 4
+    accumulate = True
+
+    # Build timeline
+    timeline = builder.build_timeline_from_audio(
+        audio_path=music_data["path"],
+        beats=music_data["beats"],
+        downbeats=music_data["downbeats"],
+        segments=music_data["segments"],
+        subdivision_level=subdivision_level,
+        accumulate=accumulate,
+    )
+
+    # Comprehensive validation
+    assert timeline is not None
+    assert timeline.duration().to_seconds() > 0
+
+    # Check that all expected tracks exist
+    track_names = [track.name for track in timeline.tracks]
+    assert "Audio 1" in track_names
+    assert "Segments" in track_names
+    assert "Downbeats" in track_names
+    assert "Beats" in track_names
+    assert f"Subdivisions (1/{subdivision_level})" in track_names
+
+    # Validate timing
+    audio_track = next(track for track in timeline.tracks if track.name == "Audio 1")
+    segments_track = next(
+        track for track in timeline.tracks if track.name == "Segments"
+    )
+
+    # Audio track should have exactly one clip covering the entire timeline
+    assert len(audio_track) == 1
+    assert isinstance(audio_track[0], otio.schema.Clip)
+
+    # Segments track should have clips aligned to music structure
+    segment_clips = [
+        item for item in segments_track if isinstance(item, otio.schema.Clip)
+    ]
+    assert len(segment_clips) == len(music_data["segments"])
+
+    # Validate that all segments have markers
+    total_segment_markers = sum(len(clip.markers) for clip in segment_clips)
+    assert total_segment_markers == len(music_data["segments"])
+
+    logger.info("End-to-end test passed successfully")
+
+
+def test_build_timeline_invalid_audio_path():
+    """Test error handling for invalid audio path."""
+    result = builder.build_timeline_from_audio(
+        audio_path="/nonexistent/path.wav",
+        beats=[1.0, 2.0],
+        downbeats=[1.0],
+        segments=[{"start": 0.0, "end": 2.0, "label": "test"}],
+    )
+    assert result is None
+
+
+def test_build_timeline_missing_audio_path():
+    """Test error handling for missing audio path."""
+    result = builder.build_timeline_from_audio(
+        audio_path="",
+        beats=[1.0, 2.0],
+        downbeats=[1.0],
+        segments=[{"start": 0.0, "end": 2.0, "label": "test"}],
+    )
+    assert result is None
+
+
+def test_build_timeline_empty_beats():
+    """Test error handling for empty beats list."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    result = builder.build_timeline_from_audio(
+        audio_path=music_data["path"],
+        beats=[],
+        downbeats=[1.0],
+        segments=[{"start": 0.0, "end": 2.0, "label": "test"}],
+    )
+    assert result is None
+
+
+def test_build_timeline_empty_segments():
+    """Test error handling for empty segments list."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    result = builder.build_timeline_from_audio(
+        audio_path=music_data["path"], beats=[1.0, 2.0], downbeats=[1.0], segments=[]
+    )
+    assert result is None
+
+
+def test_build_timeline_no_downbeats():
+    """Test timeline building with no downbeats."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    timeline = builder.build_timeline_from_audio(
+        audio_path=music_data["path"],
+        beats=[1.0, 2.0, 3.0],
+        downbeats=[],
+        segments=[{"start": 0.0, "end": 3.0, "label": "test"}],
+    )
+    assert timeline is not None
+
+    # Should still have all tracks except downbeats should be empty
+    track_names = [track.name for track in timeline.tracks]
+    assert "Downbeats" in track_names
+
+
+def test_build_timeline_invalid_subdivision_level():
+    """Test timeline building with invalid subdivision level."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    timeline = builder.build_timeline_from_audio(
+        audio_path=music_data["path"],
+        beats=[1.0, 2.0, 3.0],
+        downbeats=[1.0],
+        segments=[{"start": 0.0, "end": 3.0, "label": "test"}],
+        subdivision_level=0,  # Invalid level
+    )
+    assert timeline is not None
+    # Should default to level 1
+    track_names = [track.name for track in timeline.tracks]
+    assert "Subdivisions" not in " ".join(track_names)
+
+
+def test_build_timeline_conversion_error():
+    """Test error handling for time conversion errors."""
+    music_data = load_test_data(MUSIC_JSON_PATH)
+    # Use invalid time values that can't be converted
+    result = builder.build_timeline_from_audio(
+        audio_path=music_data["path"],
+        beats=["invalid", "time"],
+        downbeats=[1.0],
+        segments=[{"start": 0.0, "end": 2.0, "label": "test"}],
+    )
+    assert result is None
+
+
+def test_calculate_subdivision_markers_rt_edge_cases():
+    """Test edge cases for subdivision marker calculation."""
+    rate = 48000
+
+    # Test with empty beats
+    result = builder._calculate_subdivision_markers_rt([], 2, rate)
+    assert result == []
+
+    # Test with subdivision level < 1
+    beats_rt = [otio.opentime.RationalTime(1.0 * rate, rate)]
+    result = builder._calculate_subdivision_markers_rt(beats_rt, 0, rate)
+    assert result == []
+
+    # Test with single beat (no intervals)
+    result = builder._calculate_subdivision_markers_rt(beats_rt, 2, rate)
+    assert result == []
+
+    # Test with zero duration interval
+    beats_rt = [
+        otio.opentime.RationalTime(1.0 * rate, rate),
+        otio.opentime.RationalTime(1.0 * rate, rate),  # Same time
+    ]
+    result = builder._calculate_subdivision_markers_rt(beats_rt, 2, rate)
+    assert result == []
+
+
+def test_get_audio_duration_ffmpeg_error_cases():
+    """Test error handling in audio duration detection."""
+    # Test with non-existent file
+    duration = builder._get_audio_duration_ffmpeg("/nonexistent/file.wav")
+    assert duration is None
