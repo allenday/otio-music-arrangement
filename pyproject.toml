@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "otio-music-arrangement"
 version = "0.1.0"
@@ -46,28 +50,21 @@ dev = [
 [project.scripts]
 otio-music-arrange = "otio_music_arrangement.cli:main"
 
-[tool.hatch.version]
-path = "src/otio_music_arrangement/__init__.py" # Assuming source layout
+[tool.setuptools]
+package-dir = {"" = "src"}
 
-[tool.hatch.metadata]
-allow-direct-references = true
+[tool.setuptools.packages.find]
+where = ["src"]
 
-[tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/tests",
-    "/README.md",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/otio_music_arrangement"]
+[tool.setuptools.package-data]
+"*" = ["tests/fixtures/*.json", "tests/fixtures/*.mp3"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q"
 testpaths = [
     "tests",
-] 
+]
 
 [tool.coverage.run]
 source = ["src/otio_music_arrangement"]
