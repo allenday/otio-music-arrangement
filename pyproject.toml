@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "otio-music-arrangement"
-version = "0.1.0"
+version = "0.1.2"
 authors = [
   # Add your name and email here if you like
   # { name="Allen Day", email="allenday@allenday.com" },
@@ -24,7 +24,7 @@ dependencies = [
     "ffmpeg-python >= 0.2.0", # For audio probing
     "librosa >= 0.9",        # For beat detection
     "numpy",                 # Dependency for librosa
-    "otio-fcpx-xml-lite-adapter == 0.1.0"
+    "otio-fcpx-xml-lite-adapter >= 0.1.2"
 ]
 
 [project.optional-dependencies]
