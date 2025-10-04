@@ -15,7 +15,7 @@ from otio_music_arrangement import builder
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXTURE_PATH = os.path.join(TEST_DIR, "fixtures")
 MUSIC_JSON_PATH = os.path.join(FIXTURE_PATH, "music.json")
-MUSIC_AUDIO_PATH = os.path.join(FIXTURE_PATH, "music.wav")
+MUSIC_AUDIO_PATH = os.path.join(FIXTURE_PATH, "music.mp3")
 
 
 # Configure logging for tests

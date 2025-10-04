@@ -28,7 +28,7 @@ def time_value(time_obj: opentime.RationalTime | NumericType) -> float:
         Float time value in seconds.
     """
     if isinstance(time_obj, opentime.RationalTime):
-        return float(time_obj.value)
+        return time_obj.to_seconds()
     return float(time_obj)  # Assume float/int otherwise
 
 
@@ -61,16 +61,16 @@ def adjust_segment_times_to_downbeats(
             {
                 "label": seg.get("label", f"Segment {i + 1}"),
                 "original_start_time": opentime.RationalTime(
-                    time_value(seg.get("start", 0)), global_start_time.rate
+                    time_value(seg.get("start", 0)) * global_start_time.rate, global_start_time.rate
                 ),
                 "original_end_time": opentime.RationalTime(
-                    time_value(seg.get("end", 0)), global_start_time.rate
+                    time_value(seg.get("end", 0)) * global_start_time.rate, global_start_time.rate
                 ),
                 "adjusted_start_time": opentime.RationalTime(
-                    time_value(seg.get("start", 0)), global_start_time.rate
+                    time_value(seg.get("start", 0)) * global_start_time.rate, global_start_time.rate
                 ),
                 "adjusted_end_time": opentime.RationalTime(
-                    time_value(seg.get("end", 0)), global_start_time.rate
+                    time_value(seg.get("end", 0)) * global_start_time.rate, global_start_time.rate
                 ),
             }
             for i, seg in enumerate(segments)
@@ -82,7 +82,7 @@ def adjust_segment_times_to_downbeats(
     try:
         # Convert downbeats to RationalTime, relative to global_start_time (assumed 0)
         sorted_downbeats_rt = sorted(
-            [opentime.RationalTime(time_value(d), rate) for d in downbeats]
+            [opentime.RationalTime(time_value(d) * rate, rate) for d in downbeats]
         )
     except Exception as e:
         logger.error("Error converting downbeats to RationalTime: %s", e, exc_info=True)
@@ -91,16 +91,16 @@ def adjust_segment_times_to_downbeats(
             {
                 "label": seg.get("label", f"Segment {i + 1}"),
                 "original_start_time": opentime.RationalTime(
-                    time_value(seg.get("start", 0)), rate
+                    time_value(seg.get("start", 0)) * rate, rate
                 ),
                 "original_end_time": opentime.RationalTime(
-                    time_value(seg.get("end", 0)), rate
+                    time_value(seg.get("end", 0)) * rate, rate
                 ),
                 "adjusted_start_time": opentime.RationalTime(
-                    time_value(seg.get("start", 0)), rate
+                    time_value(seg.get("start", 0)) * rate, rate
                 ),
                 "adjusted_end_time": opentime.RationalTime(
-                    time_value(seg.get("end", 0)), rate
+                    time_value(seg.get("end", 0)) * rate, rate
                 ),
             }
             for i, seg in enumerate(segments)
@@ -113,10 +113,10 @@ def adjust_segment_times_to_downbeats(
         label = seg.get("label", f"Segment {i + 1}")
         try:
             # Convert original segment times to RationalTime
-            original_start_rt = opentime.RationalTime(
-                time_value(seg.get("start", 0)), rate
-            )
-            original_end_rt = opentime.RationalTime(time_value(seg.get("end", 0)), rate)
+            start_seconds = time_value(seg.get("start", 0))
+            end_seconds = time_value(seg.get("end", 0))
+            original_start_rt = opentime.RationalTime(start_seconds * rate, rate)
+            original_end_rt = opentime.RationalTime(end_seconds * rate, rate)
         except Exception as e:
             logger.error(
                 "Error converting segment %d times to RationalTime: %s. Segment: %s",
@@ -156,6 +156,18 @@ def adjust_segment_times_to_downbeats(
         possible_ends = [db for db in sorted_downbeats_rt if db >= original_end_rt]
         if possible_ends:
             nearest_end_db_rt = min(possible_ends)
+            # Special case: if start was moved to first downbeat and end would be same downbeat,
+            # move end to the next downbeat to maintain meaningful duration
+            if (nearest_start_db_rt == first_downbeat_rt and
+                nearest_end_db_rt == first_downbeat_rt and
+                len(sorted_downbeats_rt) > 1):
+                nearest_end_db_rt = sorted_downbeats_rt[1]
+                logger.debug(
+                    "Segment '%s' start moved to first downbeat, extending end to next downbeat %s "
+                    "to maintain meaningful duration.",
+                    label,
+                    nearest_end_db_rt,
+                )
         elif sorted_downbeats_rt:
             # If ends after last downbeat, snap to last downbeat
             last_db = sorted_downbeats_rt[-1]
@@ -205,15 +217,21 @@ def adjust_segment_times_to_downbeats(
         if nearest_start_db_rt > nearest_end_db_rt:
             logger.warning(
                 "Segment '%s' initial snap resulted in start %s > end %s. "
-                "Snapping both to start %s.",
+                "Finding next valid downbeat for end.",
                 label,
                 nearest_start_db_rt,
                 nearest_end_db_rt,
-                nearest_start_db_rt,
             )
-            # If initial snap makes start > end, usually means segment is tiny
-            # and fits between dbs. Snapping both to the *start* db seems most logical.
-            nearest_end_db_rt = nearest_start_db_rt
+            # Find the next downbeat after the start to use as end
+            next_dbs = [db for db in sorted_downbeats_rt if db > nearest_start_db_rt]
+            if next_dbs:
+                nearest_end_db_rt = next_dbs[0]
+                logger.debug(f"Using next downbeat {nearest_end_db_rt} as end for segment '{label}'")
+            else:
+                # No downbeat after start, keep original end or extend slightly
+                original_duration = original_end_rt - original_start_rt
+                nearest_end_db_rt = nearest_start_db_rt + original_duration
+                logger.debug(f"No downbeat after start, extending by original duration to {nearest_end_db_rt}")
 
         adjusted_start_final = nearest_start_db_rt
         adjusted_end_final = nearest_end_db_rt
@@ -234,12 +252,21 @@ def adjust_segment_times_to_downbeats(
         if adjusted_end_final < adjusted_start_final:
             logger.warning(
                 "Segment '%s' adjusted end %s is before adjusted start %s "
-                "after overlap correction. Setting end equal to start.",
+                "after overlap correction. Finding next valid end time.",
                 label,
                 adjusted_end_final,
                 adjusted_start_final,
             )
-            adjusted_end_final = adjusted_start_final
+            # Try to find a reasonable end time instead of making zero duration
+            next_dbs = [db for db in sorted_downbeats_rt if db > adjusted_start_final]
+            if next_dbs:
+                adjusted_end_final = next_dbs[0]
+                logger.debug(f"Using next downbeat {adjusted_end_final} as corrected end")
+            else:
+                # As last resort, add minimum duration
+                min_duration = opentime.RationalTime(int(0.5 * rate), rate)  # 0.5 second minimum
+                adjusted_end_final = adjusted_start_final + min_duration
+                logger.debug(f"No suitable downbeat, adding minimum duration: {adjusted_end_final}")
 
         logger.debug(
             "Segment '%s': Original (%s - %s), Adjusted (%s - %s)",
@@ -300,7 +327,7 @@ def calculate_subdivision_markers(
 
     try:
         # Convert beat times to RationalTime
-        beats_rt = [opentime.RationalTime(time_value(b), rate) for b in beats]
+        beats_rt = [opentime.RationalTime(time_value(b) * rate, rate) for b in beats]
     except Exception as e:
         logger.error("Error converting beats to RationalTime: %s", e, exc_info=True)
         return markers

@@ -173,6 +173,7 @@ def build_timeline_from_audio(
     segments: list[dict[str, Any]],
     subdivision_level: int = 1,
     accumulate: bool = False,
+    frame_rate: float = 30.0,
 ) -> otio.schema.Timeline | None:
     """Builds an OTIO timeline compatible with otio-fcpx-xml-lite-adapter.
 
@@ -189,6 +190,8 @@ def build_timeline_from_audio(
         accumulate: If True, markers accumulate down tracks (e.g., a downbeat
             also appears on the Beat track). If False (default), markers appear
             only on the most specific track.
+        frame_rate: Frame rate for the timeline (default: 30.0 fps). Note: audio
+            timing calculations still use DEFAULT_RATE for precision.
 
     Returns:
         The generated OpenTimelineIO timeline object, or None if essential
@@ -208,22 +211,24 @@ def build_timeline_from_audio(
     if subdivision_level < 1:
         subdivision_level = 1
 
-    rate = DEFAULT_RATE  # Use a consistent rate
-    global_start_time = otio.opentime.RationalTime(0, rate)
+    audio_rate = DEFAULT_RATE  # Use sample rate for audio timing
+    video_rate = int(frame_rate)  # Use frame rate for video timing
+    global_start_time = otio.opentime.RationalTime(0, video_rate)
 
     # --- Convert Times to RationalTime ---
     try:
-        # Ensure times are floats/Decimals before conversion
+        # Ensure times are floats/Decimals before conversion - use video_rate for video timing
+        # Round to integer frames for consistent alignment with segment boundaries
         beats_rt = sorted(
-            [otio.opentime.RationalTime(float(b) * rate, rate) for b in beats]
+            [otio.opentime.RationalTime(round(float(b) * video_rate), video_rate) for b in beats]
         )
         downbeats_rt = sorted(
-            [otio.opentime.RationalTime(float(d) * rate, rate) for d in downbeats]
+            [otio.opentime.RationalTime(round(float(d) * video_rate), video_rate) for d in downbeats]
         )
         segments_rt = [
             {
-                "start": otio.opentime.RationalTime(float(s["start"]) * rate, rate),
-                "end": otio.opentime.RationalTime(float(s["end"]) * rate, rate),
+                "start": otio.opentime.RationalTime(round(float(s["start"]) * video_rate), video_rate),
+                "end": otio.opentime.RationalTime(round(float(s["end"]) * video_rate), video_rate),
                 "label": s["label"],
             }
             for s in segments
@@ -241,12 +246,12 @@ def build_timeline_from_audio(
     max_beat_time = max(all_beat_times) if all_beat_times else global_start_time
     max_time_rt = max(max_segment_end, max_beat_time)
 
-    # Get actual audio duration
+    # Get actual audio duration - convert to video rate for timeline consistency
     actual_audio_duration_rt = global_start_time
     actual_duration_seconds = _get_audio_duration_ffmpeg(audio_path)
     if actual_duration_seconds is not None:
         actual_audio_duration_rt = otio.opentime.RationalTime(
-            actual_duration_seconds * rate, rate
+            actual_duration_seconds * video_rate, video_rate
         )
         logger.info(
             "Actual audio file duration: %s (%.3f sec)",
@@ -263,12 +268,12 @@ def build_timeline_from_audio(
 
     # Quantize duration to nearest frame - essential for FCPXML
     timeline_duration_frames = int(round(timeline_duration_rt.to_frames()))
-    timeline_duration_rt = otio.opentime.RationalTime(timeline_duration_frames, rate)
+    timeline_duration_rt = otio.opentime.RationalTime(timeline_duration_frames, video_rate)
     if timeline_duration_rt <= global_start_time:
         logger.warning(
             "Calculated timeline duration is zero or negative. Setting to 1 frame."
         )
-        timeline_duration_rt = otio.opentime.RationalTime(1, rate)
+        timeline_duration_rt = otio.opentime.RationalTime(1, video_rate)
     logger.info(
         "Final quantized timeline duration: %s (%.3f sec)",
         timeline_duration_rt,
@@ -352,7 +357,7 @@ def build_timeline_from_audio(
     subdivision_markers_rt = []
     if subdivision_level > 1:
         subdivision_markers_rt = _calculate_subdivision_markers_rt(
-            beats_rt, subdivision_level, rate
+            beats_rt, subdivision_level, video_rate
         )
 
     # Create sets of FRAME NUMBERS for faster lookup
@@ -385,8 +390,8 @@ def build_timeline_from_audio(
         # Quantize segment times to frames
         start_frame = int(round(seg_start_rt.to_frames()))
         end_frame = int(round(seg_end_rt.to_frames()))
-        quantized_seg_start_rt = otio.opentime.RationalTime(start_frame, rate)
-        quantized_seg_end_rt = otio.opentime.RationalTime(end_frame, rate)
+        quantized_seg_start_rt = otio.opentime.RationalTime(start_frame, video_rate)
+        quantized_seg_end_rt = otio.opentime.RationalTime(end_frame, video_rate)
         quantized_seg_duration_rt = quantized_seg_end_rt - quantized_seg_start_rt
 
         if quantized_seg_duration_rt <= global_start_time:
